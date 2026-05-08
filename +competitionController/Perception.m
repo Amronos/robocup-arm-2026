@@ -111,21 +111,26 @@ classdef Perception
                 entry.basePosition = graspPosition;
                 entry.baseYaw = graspYaw;
                 entry.variantIndex = 1;
+                entry.qRotate = qLift;
                 queue(end + 1, 1) = entry; %#ok<AGROW>
             end
 
             if isempty(queue)
-                fprintf('[PERCEPTION] rgbPx=%d depthPx=%d blobs=%d graspable=0 pose=%d ws=%d self=%d mem=%d unsafe=%d ik=%d\n', ...
-                    nnz(maskRgb), nnz(maskDepth), rawCandidates, rejectPose, rejectWorkspace, ...
-                    rejectSelf, rejectMemory, softUnsafe, rejectIK);
+                if competitionController.RuntimeDebug.isVerbose(P)
+                    fprintf('[PERCEPTION] rgbPx=%d depthPx=%d blobs=%d graspable=0 pose=%d ws=%d self=%d mem=%d unsafe=%d ik=%d\n', ...
+                        nnz(maskRgb), nnz(maskDepth), rawCandidates, rejectPose, rejectWorkspace, ...
+                        rejectSelf, rejectMemory, softUnsafe, rejectIK);
+                end
                 return;
             end
 
             [~, order] = sort([queue.score], "descend");
             queue = queue(order);
-            fprintf('[PERCEPTION] rgbPx=%d depthPx=%d blobs=%d graspable=%d pose=%d ws=%d self=%d mem=%d unsafe=%d ik=%d\n', ...
-                nnz(maskRgb), nnz(maskDepth), rawCandidates, numel(queue), rejectPose, ...
-                rejectWorkspace, rejectSelf, rejectMemory, softUnsafe, rejectIK);
+            if competitionController.RuntimeDebug.isVerbose(P)
+                fprintf('[PERCEPTION] rgbPx=%d depthPx=%d blobs=%d graspable=%d pose=%d ws=%d self=%d mem=%d unsafe=%d ik=%d\n', ...
+                    nnz(maskRgb), nnz(maskDepth), rawCandidates, numel(queue), rejectPose, ...
+                    rejectWorkspace, rejectSelf, rejectMemory, softUnsafe, rejectIK);
+            end
         end
 
         function refinedTarget = selectRefinedTarget(queue, currentTarget, ctx)

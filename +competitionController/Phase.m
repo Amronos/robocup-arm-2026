@@ -40,6 +40,9 @@ classdef Phase
             if ctx.phase == "PHASE2_SHAPE"
                 ctx.phase2Targets = repmat(struct("enabled", false, "target", competitionController.Context.emptyTarget()), 0, 1);
                 ctx.phase2TargetIndex = 1;
+            elseif ctx.phase == "PHASE3_ORIENTATION"
+                ctx.phase3Targets = competitionController.Phase3Handler.buildTargets(ctx);
+                ctx.phase3TargetIndex = 1;
             end
 
             fprintf('[PHASE] %s complete -> %s (%s)\n', oldPhase, ctx.phase, reason);
@@ -48,8 +51,10 @@ classdef Phase
 
         function ctx = handleEmptyPhaseScan(ctx, reason)
             ctx.emptyScanCount = ctx.emptyScanCount + 1;
-            fprintf('[SCAN] %s %s at step %d (empty=%d)\n', ...
-                lower(char(ctx.phase)), reason, ctx.stepCount, ctx.emptyScanCount);
+            if competitionController.RuntimeDebug.isVerbose(ctx.P)
+                fprintf('[SCAN] %s %s at step %d (empty=%d)\n', ...
+                    lower(char(ctx.phase)), reason, ctx.stepCount, ctx.emptyScanCount);
+            end
 
             if ctx.phase ~= "PHASE4_RANDOM" && ctx.emptyScanCount >= ctx.P.phaseAdvanceEmptyScans
                 ctx = competitionController.Phase.advancePhase(ctx, "phase exhausted");

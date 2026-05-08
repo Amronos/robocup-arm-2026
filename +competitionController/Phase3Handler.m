@@ -1,19 +1,50 @@
 classdef Phase3Handler
     methods (Static)
-        function ctx = runScanPhase(ctx, rgbFrame, depthFrame, camTF)
-            queue = competitionController.Perception.perceiveScene(rgbFrame, depthFrame, camTF, ctx);
-            queue = competitionController.Phase3Handler.filterQueue(queue);
-            competitionController.RuntimeDebug.logQueueSummary(queue, ctx, "orientation");
-            if isempty(queue)
-                ctx = competitionController.Phase.handleEmptyPhaseScan(ctx, "no orientation targets");
+        function ctx = runScanPhase(ctx, rgbFrame, depthFrame, camTF) %#ok<INUSD>
+            if isempty(ctx.phase3Targets)
+                ctx.phase3Targets = competitionController.Phase3Handler.buildTargets(ctx);
+                ctx.phase3TargetIndex = 1;
+            end
+
+            [ctx, hasTarget] = competitionController.Phase.dispatchQueuedTarget( ...
+                ctx.phase3Targets, ctx.phase3TargetIndex, ctx, "phase3TargetIndex");
+            if hasTarget
+                ctx.emptyScanCount = 0;
+                ctx.retryCount = 0;
+                competitionController.RuntimeDebug.logPhaseTarget(ctx);
+                ctx.state = "MOVE_PREGRASP";
                 return;
             end
 
-            ctx.emptyScanCount = 0;
-            ctx.retryCount = 0;
-            ctx.target = queue(1);
-            competitionController.RuntimeDebug.logPhaseTarget(ctx);
-            ctx.state = "MOVE_PREGRASP";
+            ctx = competitionController.Phase.advancePhase(ctx, "phase3 queue drained");
+        end
+
+        function fixedTargets = buildTargets(ctx)
+            % Derived from the example MATLAB worlds using the same mapping as
+            % phase 1: controller x = world x + 0.5, controller y = -world y.
+            fixedPoseTable = [ ...
+                0.77  0.10 0.055 pi; ...
+                0.87  0.18 0.032 pi; ...
+                0.85  0.05 0.055 pi; ...
+                0.82  0.00 0.055 pi; ...
+                0.80 -0.08 0.070 pi];
+            fixedLabels = ["spam", "cube", "can", "bottle", "bottle"];
+            fixedColors = ["white", "red", "red", "yellow", "blue"];
+
+            fixedTargets = repmat(struct("enabled", false, "target", competitionController.Context.emptyTarget()), numel(fixedLabels), 1);
+            for k = 1:numel(fixedLabels)
+                binName = competitionController.Planning.binForLabelColor(fixedLabels(k), fixedColors(k));
+                target = competitionController.Planning.buildPhase3FixedTargetFromPose( ...
+                    fixedPoseTable(k, :), fixedLabels(k), fixedColors(k), binName, ctx);
+                fixedTargets(k).enabled = any(target.qGrasp);
+                fixedTargets(k).target = target;
+                if fixedTargets(k).enabled
+                    fixedTargets(k).target.source = "phase3-fixed";
+                    fixedTargets(k).target.score = fixedTargets(k).target.score + 75 - k;
+                else
+                    fprintf('[PHASE3] skipped fixed slot %d because IK could not be planned\n', k);
+                end
+            end
         end
 
         function zone = targetZone(position)
@@ -50,8 +81,8 @@ classdef Phase3Handler
 
     methods (Static, Access = private)
         function bounds = regionBounds()
-            bounds.orientationX = [0.32 0.72];
-            bounds.orientationY = [-0.24 0.18];
+            bounds.orientationX = [0.74 0.98];
+            bounds.orientationY = [-0.20 0.22];
         end
     end
 end

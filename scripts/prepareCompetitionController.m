@@ -1,4 +1,5 @@
 function prepareCompetitionController()
+clear competitionControllerRuntime;
 addpath(pwd);
 addpath(fullfile(pwd, "scripts"));
 addpath(fullfile(pwd, "modelData"));

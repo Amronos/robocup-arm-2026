@@ -26,13 +26,17 @@ classdef Context
             ctx.verifyCount = 0;
             ctx.refineCount = 0;
             ctx.phaseOrder = ["PHASE1_FIXED", "PHASE2_SHAPE", "PHASE3_ORIENTATION", "PHASE4_RANDOM"];
-            ctx.phaseIndex = 1;
+            % Temporary patch: start directly in phase 3 while preserving normal
+            % advancement into later phases.
+            ctx.phaseIndex = 3;
             ctx.phase = ctx.phaseOrder(ctx.phaseIndex);
             ctx.target = competitionController.Context.emptyTarget();
             ctx.phase1Targets = competitionController.Phase1Handler.buildTargets(ctx);
             ctx.phase1TargetIndex = 1;
             ctx.phase2Targets = repmat(struct("enabled", false, "target", competitionController.Context.emptyTarget()), 0, 1);
             ctx.phase2TargetIndex = 1;
+            ctx.phase3Targets = competitionController.Phase3Handler.buildTargets(ctx);
+            ctx.phase3TargetIndex = 1;
             ctx.completedTargets = zeros(0, 3);
             ctx.failedTargets = zeros(0, 3);
             ctx.lastCameraTform = eye(4);
@@ -121,13 +125,24 @@ classdef Context
             P.refineSettlingSteps = max(2, round(2 / speedScale));
             P.maxEmptyScans = 40;
             P.recoveryEmptyScans = 6;
-            P.maxTargetRetries = 5;
+            P.maxTargetRetries = 3;
             P.memoryRadius = 0.08;
             P.refineRadius = 0.12;
             P.grasp.minClearance = 0.015;
-            P.retry.yawOffsets = [0, pi / 2, -pi / 2, pi, pi / 4];
-            P.retry.zOffsets = [0, 0.010, 0.010, 0.015, -0.005];
+            P.retry.yawOffsets = [0, pi / 8, -pi / 8, pi / 6, -pi / 6];
+            P.retry.zOffsets = [0, 0, 0, 0, 0];
             P.phaseAdvanceEmptyScans = 8;
+            P.phase3.matchRadius = 0.09;
+            P.phase3.maxTargetRetries = 1;
+            P.phase3.travelStep = 0.045;
+            P.phase3.graspStep = 0.015;
+            P.phase3.pregraspLift = 0.18;
+            P.phase3.postLift = 0.20;
+            P.phase3.maxSeedToPreDelta = 3.20;
+            P.phase3.maxPreToGraspDelta = 1.20;
+            P.phase3.maxGraspToLiftDelta = 1.20;
+            P.debug.verbose = true;
+            P.debug.heartbeatPeriod = 100;
 
             P.drop.blue = [-0.50 0.35 0.10];
             P.drop.green = [-0.50 -0.35 0.10];
@@ -139,6 +154,7 @@ classdef Context
                 "qPre", zeros(6, 1), ...
                 "qGrasp", zeros(6, 1), ...
                 "qLift", zeros(6, 1), ...
+                "qRotate", zeros(6, 1), ...
                 "qDrop", zeros(6, 1), ...
                 "graspPosition", zeros(3, 1), ...
                 "graspYaw", 0, ...

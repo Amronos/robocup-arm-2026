@@ -5,7 +5,8 @@ classdef Phase2Handler
             queue = competitionController.Phase2Handler.filterQueue(queue);
             competitionController.RuntimeDebug.logQueueSummary(queue, ctx, "shape-raw");
 
-            if isempty(ctx.phase2Targets)
+            if isempty(ctx.phase2Targets) || ...
+                    ~competitionController.Phase2Handler.hasPendingTargets(ctx.phase2Targets, ctx.phase2TargetIndex)
                 ctx.phase2Targets = competitionController.Phase2Handler.buildTargets(queue, ctx);
                 ctx.phase2TargetIndex = 1;
             end
@@ -54,6 +55,16 @@ classdef Phase2Handler
     end
 
     methods (Static, Access = private)
+        function tf = hasPendingTargets(targets, targetIndex)
+            tf = false;
+            for idx = targetIndex:numel(targets)
+                if targets(idx).enabled
+                    tf = true;
+                    return;
+                end
+            end
+        end
+
         function targets = buildTargets(queue, ctx)
             slotTable = [ ...
                 0.22  0.36 0.15  pi / 2; ...

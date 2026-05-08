@@ -27,21 +27,9 @@ classdef Planning
             graspPosition(3) = graspPosition(3) + ctx.P.motion.graspBiasZ;
             graspPosition(3) = max(graspPosition(3), ctx.P.motion.minGraspZ);
             graspPosition(3) = min(graspPosition(3), ctx.P.motion.maxGraspZ);
-
-            prePosition = graspPosition + [0; 0; ctx.P.motion.pregraspLift];
-            liftPosition = graspPosition + [0; 0; ctx.P.motion.postLift];
-            prePosition(3) = min(prePosition(3), ctx.P.motion.maxPregraspZ);
-            liftPosition(3) = min(liftPosition(3), ctx.P.motion.maxLiftZ);
-
-            Tgrasp = competitionController.Planning.makeT(graspPosition + [0; 0; ctx.P.motion.graspClearance], yaw);
-            Tpre = competitionController.Planning.makeT(prePosition, yaw);
-            Tlift = competitionController.Planning.makeT(liftPosition, yaw);
-
-            [qPre, okPre] = competitionController.Planning.solveIk(ctx, Tpre, ctx.lastArmQ);
-            [qGrasp, okGrasp] = competitionController.Planning.solveIk(ctx, Tgrasp, qPre);
-            [qLift, okLift] = competitionController.Planning.solveIk(ctx, Tlift, qGrasp);
-
-            if ~(okPre && okGrasp && okLift)
+            [qPre, qGrasp, qLift, ok] = competitionController.Planning.planPoseAtYaw( ...
+                ctx, graspPosition, yaw, ctx.lastArmQ);
+            if ~ok
                 [qPre, qGrasp, qLift] = deal(zeros(6, 1));
             end
         end
@@ -50,20 +38,9 @@ classdef Planning
             target = competitionController.Context.emptyTarget();
             graspPosition = poseRow(1:3)';
             yaw = poseRow(4);
-
-            prePosition = graspPosition + [0; 0; ctx.P.motion.pregraspLift];
-            liftPosition = graspPosition + [0; 0; ctx.P.motion.postLift];
-            prePosition(3) = min(prePosition(3), ctx.P.motion.maxPregraspZ);
-            liftPosition(3) = min(liftPosition(3), ctx.P.motion.maxLiftZ);
-
-            Tgrasp = competitionController.Planning.makeT(graspPosition + [0; 0; ctx.P.motion.graspClearance], yaw);
-            Tpre = competitionController.Planning.makeT(prePosition, yaw);
-            Tlift = competitionController.Planning.makeT(liftPosition, yaw);
-
-            [qPre, okPre] = competitionController.Planning.solveIk(ctx, Tpre, qSeed);
-            [qGrasp, okGrasp] = competitionController.Planning.solveIk(ctx, Tgrasp, qPre);
-            [qLift, okLift] = competitionController.Planning.solveIk(ctx, Tlift, qGrasp);
-            if ~(okPre && okGrasp && okLift)
+            [qPre, qGrasp, qLift, ok] = competitionController.Planning.planPoseAtYawExact( ...
+                ctx, graspPosition, yaw, qSeed);
+            if ~ok
                 return;
             end
 
@@ -71,6 +48,7 @@ classdef Planning
             target.qPre = qPre;
             target.qGrasp = qGrasp;
             target.qLift = qLift;
+            target.qRotate = qLift;
             target.qDrop = competitionController.Planning.dropQForBin(binName, ctx);
             target.graspPosition = graspPosition;
             target.graspYaw = yaw;
@@ -83,6 +61,68 @@ classdef Planning
             target.basePosition = graspPosition;
             target.baseYaw = yaw;
             target.variantIndex = 1;
+        end
+
+        function target = buildPhase3FixedTargetFromPose(poseRow, label, color, binName, ctx)
+            target = competitionController.Context.emptyTarget();
+            graspPosition = poseRow(1:3)';
+            yaw = poseRow(4);
+            [qPre, qGrasp, qLift, ok] = competitionController.Planning.planPhase3FixedPose( ...
+                ctx, graspPosition, yaw);
+            if ~ok
+                return;
+            end
+
+            target.position = graspPosition;
+            target.qPre = qPre;
+            target.qGrasp = qGrasp;
+            target.qLift = qLift;
+            target.qRotate = qLift;
+            target.qDrop = competitionController.Planning.dropQForBin(binName, ctx);
+            target.graspPosition = graspPosition;
+            target.graspYaw = yaw;
+            target.score = competitionController.Planning.pointValue(label, color) + 100;
+            target.label = label;
+            target.color = color;
+            target.height = competitionController.Planning.nominalHeightForLabel(label, ctx.P);
+            target.source = "fixed";
+            target.dropBin = binName;
+            target.basePosition = graspPosition;
+            target.baseYaw = yaw;
+            target.variantIndex = 1;
+        end
+
+        function [qPre, qGrasp, qLift, ok] = planPhase3FixedPose(ctx, graspPosition, yaw)
+            qPre = zeros(6, 1);
+            qGrasp = zeros(6, 1);
+            qLift = zeros(6, 1);
+            ok = false;
+            bestCost = inf;
+
+            seedSet = [ctx.scanSweepQs, ctx.homeQ];
+            for idx = 1:size(seedSet, 2)
+                qSeed = seedSet(:, idx);
+                [trialPre, trialGrasp, trialLift, trialOk] = competitionController.Planning.planPoseAtYawConservative( ...
+                    ctx, graspPosition, yaw, qSeed, ...
+                    ctx.P.phase3.pregraspLift, ctx.P.phase3.postLift, ...
+                    ctx.P.phase3.maxSeedToPreDelta, ...
+                    ctx.P.phase3.maxPreToGraspDelta, ...
+                    ctx.P.phase3.maxGraspToLiftDelta);
+                if ~trialOk
+                    continue;
+                end
+
+                cost = competitionController.Planning.jointDeltaNorm(qSeed, trialPre) + ...
+                    competitionController.Planning.jointDeltaNorm(trialPre, trialGrasp) + ...
+                    competitionController.Planning.jointDeltaNorm(trialGrasp, trialLift);
+                if cost < bestCost
+                    bestCost = cost;
+                    qPre = trialPre;
+                    qGrasp = trialGrasp;
+                    qLift = trialLift;
+                    ok = true;
+                end
+            end
         end
 
         function qDrop = dropQForBin(binName, ctx)
@@ -167,44 +207,97 @@ classdef Planning
         function [ctx, recovered] = tryAlternateTargetPlan(ctx)
             recovered = false;
             basePos = ctx.target.basePosition(:);
-            qSeed = ctx.lastArmQ;
 
             for variant = (ctx.target.variantIndex + 1):numel(ctx.P.retry.yawOffsets)
                 yaw = wrapToPi(ctx.target.baseYaw + ctx.P.retry.yawOffsets(variant));
                 graspPosition = basePos;
-                graspPosition(3) = min(max( ...
-                    basePos(3) + ctx.P.retry.zOffsets(variant), ...
-                    ctx.P.motion.minGraspZ), ...
-                    ctx.P.motion.maxGraspZ);
-
-                prePosition = graspPosition + [0; 0; ctx.P.motion.pregraspLift];
-                liftPosition = graspPosition + [0; 0; ctx.P.motion.postLift];
-                prePosition(3) = min(prePosition(3), ctx.P.motion.maxPregraspZ);
-                liftPosition(3) = min(liftPosition(3), ctx.P.motion.maxLiftZ);
-
-                Tgrasp = competitionController.Planning.makeT(graspPosition + [0; 0; ctx.P.motion.graspClearance], yaw);
-                Tpre = competitionController.Planning.makeT(prePosition, yaw);
-                Tlift = competitionController.Planning.makeT(liftPosition, yaw);
-
-                [qPre, okPre] = competitionController.Planning.solveIk(ctx, Tpre, qSeed);
-                [qGrasp, okGrasp] = competitionController.Planning.solveIk(ctx, Tgrasp, qPre);
-                [qLift, okLift] = competitionController.Planning.solveIk(ctx, Tlift, qGrasp);
-                if ~(okPre && okGrasp && okLift)
-                    continue;
-                end
+                yawDelta = wrapToPi(yaw - ctx.target.graspYaw);
+                qPre = ctx.target.qPre;
+                qGrasp = ctx.target.qGrasp;
+                qLift = ctx.target.qLift;
+                qPre(6) = wrapToPi(qPre(6) + yawDelta);
+                qGrasp(6) = wrapToPi(qGrasp(6) + yawDelta);
+                qLift(6) = wrapToPi(qLift(6) + yawDelta);
 
                 ctx.target.qPre = qPre;
                 ctx.target.qGrasp = qGrasp;
                 ctx.target.qLift = qLift;
+                ctx.target.qRotate = qLift;
                 ctx.target.graspPosition = graspPosition;
                 ctx.target.graspYaw = yaw;
                 ctx.target.variantIndex = variant;
-                ctx.state = "MOVE_PREGRASP";
-                fprintf('[RECOVER] %s variant=%d yaw=%.2f z=%.3f\n', ...
+                ctx.state = "MOVE_RETRY_ROTATE";
+                fprintf('[RECOVER] %s variant=%d yaw=%.2f wrist=%.2f via-lift\n', ...
                     competitionController.RuntimeDebug.targetSummary(ctx.target), ...
-                    variant, yaw, graspPosition(3));
+                    variant, yaw, qGrasp(6));
                 recovered = true;
                 return;
+            end
+        end
+
+        function [qPre, qGrasp, qLift, ok] = planPoseAtYaw(ctx, graspPosition, yaw, qSeed)
+            prePosition = graspPosition + [0; 0; ctx.P.motion.pregraspLift];
+            liftPosition = graspPosition + [0; 0; ctx.P.motion.postLift];
+            prePosition(3) = min(prePosition(3), ctx.P.motion.maxPregraspZ);
+            liftPosition(3) = min(liftPosition(3), ctx.P.motion.maxLiftZ);
+
+            Tgrasp = competitionController.Planning.makeT(graspPosition + [0; 0; ctx.P.motion.graspClearance], yaw);
+            Tpre = competitionController.Planning.makeT(prePosition, yaw);
+            Tlift = competitionController.Planning.makeT(liftPosition, yaw);
+
+            [qPre, okPre] = competitionController.Planning.solveIk(ctx, Tpre, qSeed);
+            [qGrasp, okGrasp] = competitionController.Planning.solveIk(ctx, Tgrasp, qPre);
+            [qLift, okLift] = competitionController.Planning.solveIk(ctx, Tlift, qGrasp);
+            ok = okPre && okGrasp && okLift;
+            if ~ok
+                [qPre, qGrasp, qLift] = deal(zeros(6, 1));
+            end
+        end
+
+        function [qPre, qGrasp, qLift, ok] = planPoseAtYawExact(ctx, graspPosition, yaw, qSeed)
+            prePosition = graspPosition + [0; 0; ctx.P.motion.pregraspLift];
+            liftPosition = graspPosition + [0; 0; ctx.P.motion.postLift];
+            prePosition(3) = min(prePosition(3), ctx.P.motion.maxPregraspZ);
+            liftPosition(3) = min(liftPosition(3), ctx.P.motion.maxLiftZ);
+
+            Tgrasp = competitionController.Planning.makeT(graspPosition + [0; 0; ctx.P.motion.graspClearance], yaw);
+            Tpre = competitionController.Planning.makeT(prePosition, yaw);
+            Tlift = competitionController.Planning.makeT(liftPosition, yaw);
+
+            [qPre, okPre] = competitionController.Planning.solveIkExact(ctx, Tpre, qSeed);
+            [qGrasp, okGrasp] = competitionController.Planning.solveIkExact(ctx, Tgrasp, qPre);
+            [qLift, okLift] = competitionController.Planning.solveIkExact(ctx, Tlift, qGrasp);
+            ok = okPre && okGrasp && okLift;
+            if ~ok
+                [qPre, qGrasp, qLift] = deal(zeros(6, 1));
+            end
+        end
+
+        function [qPre, qGrasp, qLift, ok] = planPoseAtYawConservative(ctx, graspPosition, yaw, qSeed, pregraspLift, postLift, maxSeedToPreDelta, maxPreToGraspDelta, maxGraspToLiftDelta)
+            prePosition = graspPosition + [0; 0; pregraspLift];
+            liftPosition = graspPosition + [0; 0; postLift];
+            prePosition(3) = min(prePosition(3), ctx.P.motion.maxPregraspZ);
+            liftPosition(3) = min(liftPosition(3), ctx.P.motion.maxLiftZ);
+
+            Tgrasp = competitionController.Planning.makeT(graspPosition + [0; 0; ctx.P.motion.graspClearance], yaw);
+            Tpre = competitionController.Planning.makeT(prePosition, yaw);
+            Tlift = competitionController.Planning.makeT(liftPosition, yaw);
+
+            [qPre, okPre] = competitionController.Planning.solveIkExact(ctx, Tpre, qSeed);
+            [qGrasp, okGrasp] = competitionController.Planning.solveIkExact(ctx, Tgrasp, qPre);
+            [qLift, okLift] = competitionController.Planning.solveIkExact(ctx, Tlift, qGrasp);
+            ok = okPre && okGrasp && okLift;
+            if ~ok
+                [qPre, qGrasp, qLift] = deal(zeros(6, 1));
+                return;
+            end
+
+            seedToPre = competitionController.Planning.jointDeltaNorm(qSeed, qPre);
+            preToGrasp = competitionController.Planning.jointDeltaNorm(qPre, qGrasp);
+            graspToLift = competitionController.Planning.jointDeltaNorm(qGrasp, qLift);
+            if seedToPre > maxSeedToPreDelta || preToGrasp > maxPreToGraspDelta || graspToLift > maxGraspToLiftDelta
+                [qPre, qGrasp, qLift] = deal(zeros(6, 1));
+                ok = false;
             end
         end
 
@@ -235,6 +328,23 @@ classdef Planning
                     end
                 end
             end
+        end
+
+        function [qArm, ok] = solveIkExact(ctx, targetTform, qSeedArm)
+            ok = false;
+            qArm = zeros(6, 1);
+            qSeedFull = [qSeedArm(:)' zeros(1, 6)];
+            [qSol, info] = ctx.ik("tool0", targetTform, [0.25 0.25 0.25 1 1 1], qSeedFull);
+            if strcmpi(info.Status, "success") || info.PoseErrorNorm < 5e-3
+                qArm = qSol(1:6)';
+                qArm = qArm(:);
+                ok = true;
+            end
+        end
+
+        function d = jointDeltaNorm(q1, q2)
+            delta = wrapToPi(q2(:) - q1(:));
+            d = norm(delta);
         end
 
         function qGreen = solveMirroredDrop(ikSolver, robot, qBlue)

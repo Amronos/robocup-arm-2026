@@ -22,7 +22,7 @@ classdef RuntimeDebug
                     q(1), q(2), q(3), q(4), q(5), q(6), competitionController.RuntimeDebug.targetSummary(ctx.target));
             end
 
-            if mod(ctx.stepCount, 100) == 0
+            if mod(ctx.stepCount, ctx.P.debug.heartbeatPeriod) == 0
                 fprintf('[HEARTBEAT] step=%d phase=%s state=%s scanIdx=%d completed=%d target=%s\n', ...
                     ctx.stepCount, ctx.phase, ctx.state, ctx.scanTargetIndex, ...
                     ctx.completedCount, competitionController.RuntimeDebug.targetSummary(ctx.target));
@@ -54,6 +54,10 @@ classdef RuntimeDebug
             end
 
             summary = sprintf('%s/%s/%s', target.color, target.label, target.source);
+        end
+
+        function tf = isVerbose(~)
+            tf = true;
         end
     end
 end
