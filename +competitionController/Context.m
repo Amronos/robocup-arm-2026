@@ -140,7 +140,7 @@ classdef Context
             P.phase1.maxPreToGraspDelta = 1.50;
             P.phase1.maxGraspToLiftDelta = 1.40;
             P.phase3.matchRadius = 0.09;
-            P.phase3.maxTargetRetries = 1;
+            P.phase3.maxTargetRetries = 2;
             P.phase3.travelStep = 0.045;
             P.phase3.graspStep = 0.015;
             P.phase3.pregraspLift = 0.18;

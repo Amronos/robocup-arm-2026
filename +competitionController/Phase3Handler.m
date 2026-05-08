@@ -20,16 +20,13 @@ classdef Phase3Handler
         end
 
         function fixedTargets = buildTargets(ctx)
-            % Derived from the example MATLAB worlds using the same mapping as
-            % phase 1: controller x = world x + 0.5, controller y = -world y.
             fixedPoseTable = [ ...
                 0.77  0.10 0.055 pi; ...
                 0.87  0.18 0.032 pi; ...
-                0.85  0.05 0.055 pi; ...
-                0.82  0.00 0.055 pi; ...
-                0.80 -0.08 0.070 pi];
-            fixedLabels = ["spam", "cube", "can", "bottle", "bottle"];
-            fixedColors = ["white", "red", "red", "yellow", "blue"];
+                0.885  0.00 0.055 pi; ...
+                0.89 -0.12 0.130 pi];
+            fixedLabels = ["spam", "cube", "bottle", "bottle"];
+            fixedColors = ["white", "red", "yellow", "blue"];
 
             fixedTargets = repmat(struct("enabled", false, "target", competitionController.Context.emptyTarget()), numel(fixedLabels), 1);
             for k = 1:numel(fixedLabels)
