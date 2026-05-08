@@ -26,9 +26,7 @@ classdef Context
             ctx.verifyCount = 0;
             ctx.refineCount = 0;
             ctx.phaseOrder = ["PHASE1_FIXED", "PHASE2_SHAPE", "PHASE3_ORIENTATION", "PHASE4_RANDOM"];
-            % Temporary patch: start directly in phase 3 while preserving normal
-            % advancement into later phases.
-            ctx.phaseIndex = 3;
+            ctx.phaseIndex = 1;
             ctx.phase = ctx.phaseOrder(ctx.phaseIndex);
             ctx.target = competitionController.Context.emptyTarget();
             ctx.phase1Targets = competitionController.Phase1Handler.buildTargets(ctx);
@@ -132,6 +130,15 @@ classdef Context
             P.retry.yawOffsets = [0, pi / 8, -pi / 8, pi / 6, -pi / 6];
             P.retry.zOffsets = [0, 0, 0, 0, 0];
             P.phaseAdvanceEmptyScans = 8;
+            P.phase1.matchRadius = 0.10;
+            P.phase1.maxTargetRetries = 2;
+            P.phase1.travelStep = 0.070;
+            P.phase1.graspStep = 0.025;
+            P.phase1.pregraspLift = 0.18;
+            P.phase1.postLift = 0.22;
+            P.phase1.maxSeedToPreDelta = 3.60;
+            P.phase1.maxPreToGraspDelta = 1.50;
+            P.phase1.maxGraspToLiftDelta = 1.40;
             P.phase3.matchRadius = 0.09;
             P.phase3.maxTargetRetries = 1;
             P.phase3.travelStep = 0.045;

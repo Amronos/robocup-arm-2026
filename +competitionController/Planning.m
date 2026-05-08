@@ -63,6 +63,35 @@ classdef Planning
             target.variantIndex = 1;
         end
 
+        function target = buildPhase1FixedTargetFromPose(poseRow, label, color, binName, ctx)
+            target = competitionController.Context.emptyTarget();
+            graspPosition = poseRow(1:3)';
+            yaw = poseRow(4);
+            [qPre, qGrasp, qLift, ok] = competitionController.Planning.planPhase1FixedPose( ...
+                ctx, graspPosition, yaw);
+            if ~ok
+                return;
+            end
+
+            target.position = graspPosition;
+            target.qPre = qPre;
+            target.qGrasp = qGrasp;
+            target.qLift = qLift;
+            target.qRotate = qLift;
+            target.qDrop = competitionController.Planning.dropQForBin(binName, ctx);
+            target.graspPosition = graspPosition;
+            target.graspYaw = yaw;
+            target.score = competitionController.Planning.pointValue(label, color) + 100;
+            target.label = label;
+            target.color = color;
+            target.height = competitionController.Planning.nominalHeightForLabel(label, ctx.P);
+            target.source = "fixed";
+            target.dropBin = binName;
+            target.basePosition = graspPosition;
+            target.baseYaw = yaw;
+            target.variantIndex = 1;
+        end
+
         function target = buildPhase3FixedTargetFromPose(poseRow, label, color, binName, ctx)
             target = competitionController.Context.emptyTarget();
             graspPosition = poseRow(1:3)';
@@ -108,6 +137,39 @@ classdef Planning
                     ctx.P.phase3.maxSeedToPreDelta, ...
                     ctx.P.phase3.maxPreToGraspDelta, ...
                     ctx.P.phase3.maxGraspToLiftDelta);
+                if ~trialOk
+                    continue;
+                end
+
+                cost = competitionController.Planning.jointDeltaNorm(qSeed, trialPre) + ...
+                    competitionController.Planning.jointDeltaNorm(trialPre, trialGrasp) + ...
+                    competitionController.Planning.jointDeltaNorm(trialGrasp, trialLift);
+                if cost < bestCost
+                    bestCost = cost;
+                    qPre = trialPre;
+                    qGrasp = trialGrasp;
+                    qLift = trialLift;
+                    ok = true;
+                end
+            end
+        end
+
+        function [qPre, qGrasp, qLift, ok] = planPhase1FixedPose(ctx, graspPosition, yaw)
+            qPre = zeros(6, 1);
+            qGrasp = zeros(6, 1);
+            qLift = zeros(6, 1);
+            ok = false;
+            bestCost = inf;
+
+            seedSet = competitionController.Planning.phase1SeedSet(ctx);
+            for idx = 1:size(seedSet, 2)
+                qSeed = seedSet(:, idx);
+                [trialPre, trialGrasp, trialLift, trialOk] = competitionController.Planning.planPoseAtYawConservative( ...
+                    ctx, graspPosition, yaw, qSeed, ...
+                    ctx.P.phase1.pregraspLift, ctx.P.phase1.postLift, ...
+                    ctx.P.phase1.maxSeedToPreDelta, ...
+                    ctx.P.phase1.maxPreToGraspDelta, ...
+                    ctx.P.phase1.maxGraspToLiftDelta);
                 if ~trialOk
                     continue;
                 end
@@ -211,13 +273,26 @@ classdef Planning
             for variant = (ctx.target.variantIndex + 1):numel(ctx.P.retry.yawOffsets)
                 yaw = wrapToPi(ctx.target.baseYaw + ctx.P.retry.yawOffsets(variant));
                 graspPosition = basePos;
-                yawDelta = wrapToPi(yaw - ctx.target.graspYaw);
-                qPre = ctx.target.qPre;
-                qGrasp = ctx.target.qGrasp;
-                qLift = ctx.target.qLift;
-                qPre(6) = wrapToPi(qPre(6) + yawDelta);
-                qGrasp(6) = wrapToPi(qGrasp(6) + yawDelta);
-                qLift(6) = wrapToPi(qLift(6) + yawDelta);
+                isFixedTarget = any(ctx.target.source == ["phase1-fixed", "phase3-fixed"]);
+                if isFixedTarget
+                    yawDelta = wrapToPi(yaw - ctx.target.graspYaw);
+                    qPre = ctx.target.qPre;
+                    qGrasp = ctx.target.qGrasp;
+                    qLift = ctx.target.qLift;
+                    qPre(6) = wrapToPi(qPre(6) + yawDelta);
+                    qGrasp(6) = wrapToPi(qGrasp(6) + yawDelta);
+                    qLift(6) = wrapToPi(qLift(6) + yawDelta);
+                    nextState = "MOVE_RETRY_ROTATE";
+                    recoverMode = "via-lift";
+                else
+                    [qPre, qGrasp, qLift, ok] = competitionController.Planning.planPoseAtYaw( ...
+                        ctx, graspPosition, yaw, ctx.lastArmQ);
+                    if ~ok
+                        continue;
+                    end
+                    nextState = "MOVE_PREGRASP";
+                    recoverMode = "replan";
+                end
 
                 ctx.target.qPre = qPre;
                 ctx.target.qGrasp = qGrasp;
@@ -226,10 +301,10 @@ classdef Planning
                 ctx.target.graspPosition = graspPosition;
                 ctx.target.graspYaw = yaw;
                 ctx.target.variantIndex = variant;
-                ctx.state = "MOVE_RETRY_ROTATE";
-                fprintf('[RECOVER] %s variant=%d yaw=%.2f wrist=%.2f via-lift\n', ...
+                ctx.state = nextState;
+                fprintf('[RECOVER] %s variant=%d yaw=%.2f wrist=%.2f %s\n', ...
                     competitionController.RuntimeDebug.targetSummary(ctx.target), ...
-                    variant, yaw, qGrasp(6));
+                    variant, yaw, qGrasp(6), recoverMode);
                 recovered = true;
                 return;
             end
@@ -345,6 +420,33 @@ classdef Planning
         function d = jointDeltaNorm(q1, q2)
             delta = wrapToPi(q2(:) - q1(:));
             d = norm(delta);
+        end
+
+        function seedSet = phase1SeedSet(ctx)
+            seedSet = [ctx.homeQ, ctx.scanSweepQs, ctx.blueDropQ, ctx.greenDropQ];
+            seedSet = competitionController.Planning.uniqueSeedColumns(seedSet);
+        end
+
+        function seeds = uniqueSeedColumns(seedSet)
+            if isempty(seedSet)
+                seeds = zeros(6, 0);
+                return;
+            end
+
+            seeds = seedSet(:, 1);
+            for idx = 2:size(seedSet, 2)
+                candidate = seedSet(:, idx);
+                dup = false;
+                for j = 1:size(seeds, 2)
+                    if norm(wrapToPi(candidate - seeds(:, j))) < 1e-6
+                        dup = true;
+                        break;
+                    end
+                end
+                if ~dup
+                    seeds(:, end + 1) = candidate; %#ok<AGROW>
+                end
+            end
         end
 
         function qGreen = solveMirroredDrop(ikSolver, robot, qBlue)

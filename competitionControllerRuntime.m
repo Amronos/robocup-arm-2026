@@ -3,8 +3,8 @@ persistent ctx
 
 if isempty(ctx)
     ctx = competitionController.Context.initContext();
-elseif isfield(ctx, "phaseIndex") && ctx.phaseIndex < 3
-    fprintf('[RESET] stale controller context detected in %s -> reinitializing to phase 3\n', ctx.phase);
+elseif isfield(ctx, "phaseIndex") && ctx.phaseIndex > numel(ctx.phaseOrder)
+    fprintf('[RESET] stale controller context detected -> reinitializing controller\n');
     ctx = competitionController.Context.initContext();
 end
 
@@ -68,6 +68,9 @@ switch ctx.state
 
     case "MOVE_PREGRASP"
         travelStep = ctx.P.motion.travelStep;
+        if ctx.phase == "PHASE1_FIXED" && ctx.target.source == "phase1-fixed"
+            travelStep = min(travelStep, ctx.P.phase1.travelStep);
+        end
         if ctx.phase == "PHASE3_ORIENTATION" && ctx.target.source == "phase3-fixed"
             travelStep = min(travelStep, ctx.P.phase3.travelStep);
         end
@@ -75,7 +78,8 @@ switch ctx.state
             ctx.lastArmQ, ctx.target.qPre, travelStep, ctx.P.motion.arriveTol);
         currentConfig = ctx.lastArmQ;
         if arrived
-            if ctx.phase == "PHASE3_ORIENTATION" && ctx.target.source == "phase3-fixed"
+            if (ctx.phase == "PHASE1_FIXED" && ctx.target.source == "phase1-fixed") || ...
+                    (ctx.phase == "PHASE3_ORIENTATION" && ctx.target.source == "phase3-fixed")
                 ctx.state = "MOVE_GRASP";
             else
                 ctx.state = "REFINE_GRASP";
@@ -85,6 +89,9 @@ switch ctx.state
 
     case "MOVE_RETRY_ROTATE"
         travelStep = ctx.P.motion.travelStep;
+        if ctx.phase == "PHASE1_FIXED" && ctx.target.source == "phase1-fixed"
+            travelStep = min(travelStep, ctx.P.phase1.travelStep);
+        end
         if ctx.phase == "PHASE3_ORIENTATION" && ctx.target.source == "phase3-fixed"
             travelStep = min(travelStep, ctx.P.phase3.travelStep);
         end
@@ -119,6 +126,9 @@ switch ctx.state
 
     case "MOVE_GRASP"
         graspStep = ctx.P.motion.graspStep;
+        if ctx.phase == "PHASE1_FIXED" && ctx.target.source == "phase1-fixed"
+            graspStep = min(graspStep, ctx.P.phase1.graspStep);
+        end
         if ctx.phase == "PHASE3_ORIENTATION" && ctx.target.source == "phase3-fixed"
             graspStep = min(graspStep, ctx.P.phase3.graspStep);
         end
@@ -155,6 +165,9 @@ switch ctx.state
         else
             ctx.retryCount = ctx.retryCount + 1;
             maxRetries = ctx.P.maxTargetRetries;
+            if ctx.phase == "PHASE1_FIXED" && ctx.target.source == "phase1-fixed"
+                maxRetries = ctx.P.phase1.maxTargetRetries;
+            end
             if ctx.phase == "PHASE3_ORIENTATION" && ctx.target.source == "phase3-fixed"
                 maxRetries = ctx.P.phase3.maxTargetRetries;
             end
@@ -170,7 +183,8 @@ switch ctx.state
                 competitionController.RuntimeDebug.targetSummary(ctx.target), ...
                 ctx.retryCount, ctx.phase);
             ctx.failedTargets = competitionController.Context.rememberPosition(ctx.failedTargets, ctx.target.position);
-            if ctx.phase == "PHASE3_ORIENTATION" && ctx.target.source == "phase3-fixed"
+            if (ctx.phase == "PHASE1_FIXED" && ctx.target.source == "phase1-fixed") || ...
+                    (ctx.phase == "PHASE3_ORIENTATION" && ctx.target.source == "phase3-fixed")
                 ctx.state = "SCAN";
             else
                 ctx.state = "MOVE_SCAN";
@@ -206,7 +220,7 @@ switch ctx.state
             ctx.completedCount = ctx.completedCount + 1;
             ctx.completedTargets = competitionController.Context.rememberPosition(ctx.completedTargets, ctx.target.position);
             ctx.target = competitionController.Context.emptyTarget();
-            if ctx.phase == "PHASE3_ORIENTATION"
+            if ctx.phase == "PHASE1_FIXED" || ctx.phase == "PHASE3_ORIENTATION"
                 ctx.state = "SCAN";
             else
                 ctx.state = "MOVE_SCAN";
