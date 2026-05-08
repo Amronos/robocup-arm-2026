@@ -1,5 +1,13 @@
 classdef Phase
     methods (Static)
+        function phaseOrder = enabledPhaseOrder()
+            phaseOrder = ["PHASE1_FIXED", "PHASE3_ORIENTATION"];
+        end
+
+        function tf = isPhaseEnabled(phase)
+            tf = any(strcmp(competitionController.Phase.enabledPhaseOrder(), phase));
+        end
+
         function [ctx, hasTarget] = dispatchQueuedTarget(targets, targetIndex, ctx, indexField)
             hasTarget = false;
             while targetIndex <= numel(targets)
@@ -30,22 +38,32 @@ classdef Phase
             ctx.scanDirection = 1;
             ctx.settleCount = 0;
 
-            if ctx.phaseIndex > numel(ctx.phaseOrder)
+            [ctx, foundPhase] = competitionController.Phase.selectActivePhase(ctx);
+            if ~foundPhase
                 fprintf('[PHASE] %s complete -> stopping (%s)\n', oldPhase, reason);
                 ctx.state = "STOP";
                 return;
             end
 
-            ctx.phase = ctx.phaseOrder(ctx.phaseIndex);
-            if ctx.phase == "PHASE2_SHAPE"
-                ctx.phase2Targets = repmat(struct("enabled", false, "target", competitionController.Context.emptyTarget()), 0, 1);
-                ctx.phase2TargetIndex = 1;
-            elseif ctx.phase == "PHASE3_ORIENTATION"
-                ctx.phase3Targets = competitionController.Phase3Handler.buildTargets(ctx);
-                ctx.phase3TargetIndex = 1;
+            fprintf('[PHASE] %s complete -> %s (%s)\n', oldPhase, ctx.phase, reason);
+            ctx.state = "MOVE_SCAN";
+        end
+
+        function ctx = skipDisabledPhase(ctx, reason)
+            if competitionController.Phase.isPhaseEnabled(ctx.phase)
+                return;
             end
 
-            fprintf('[PHASE] %s complete -> %s (%s)\n', oldPhase, ctx.phase, reason);
+            oldPhase = ctx.phase;
+            ctx.phaseIndex = ctx.phaseIndex + 1;
+            [ctx, foundPhase] = competitionController.Phase.selectActivePhase(ctx);
+            if ~foundPhase
+                fprintf('[PHASE] skipping disabled %s -> stopping (%s)\n', oldPhase, reason);
+                ctx.state = "STOP";
+                return;
+            end
+
+            fprintf('[PHASE] skipping disabled %s -> %s (%s)\n', oldPhase, ctx.phase, reason);
             ctx.state = "MOVE_SCAN";
         end
 
@@ -81,6 +99,24 @@ classdef Phase
                 end
                 ctx.scanTargetIndex = nextIdx;
                 ctx.state = "MOVE_SCAN";
+            end
+        end
+
+        function [ctx, foundPhase] = selectActivePhase(ctx)
+            foundPhase = false;
+            while ctx.phaseIndex <= numel(ctx.phaseOrder)
+                candidate = ctx.phaseOrder(ctx.phaseIndex);
+                if competitionController.Phase.isPhaseEnabled(candidate)
+                    ctx.phase = candidate;
+                    if ctx.phase == "PHASE3_ORIENTATION"
+                        ctx.phase3Targets = competitionController.Phase3Handler.buildTargets(ctx);
+                        ctx.phase3TargetIndex = 1;
+                    end
+                    foundPhase = true;
+                    return;
+                end
+
+                ctx.phaseIndex = ctx.phaseIndex + 1;
             end
         end
     end

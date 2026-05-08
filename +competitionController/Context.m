@@ -25,7 +25,7 @@ classdef Context
             ctx.stepCount = 0;
             ctx.verifyCount = 0;
             ctx.refineCount = 0;
-            ctx.phaseOrder = ["PHASE1_FIXED", "PHASE2_SHAPE", "PHASE3_ORIENTATION", "PHASE4_RANDOM"];
+            ctx.phaseOrder = competitionController.Phase.enabledPhaseOrder();
             ctx.phaseIndex = 1;
             ctx.phase = ctx.phaseOrder(ctx.phaseIndex);
             ctx.target = competitionController.Context.emptyTarget();

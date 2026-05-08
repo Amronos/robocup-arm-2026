@@ -6,6 +6,8 @@ if isempty(ctx)
 elseif isfield(ctx, "phaseIndex") && ctx.phaseIndex > numel(ctx.phaseOrder)
     fprintf('[RESET] stale controller context detected -> reinitializing controller\n');
     ctx = competitionController.Context.initContext();
+elseif ~competitionController.Phase.isPhaseEnabled(ctx.phase)
+    ctx = competitionController.Phase.skipDisabledPhase(ctx, "phase disabled");
 end
 
 entryState = ctx.state;
