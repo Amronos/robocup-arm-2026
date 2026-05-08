@@ -5,6 +5,9 @@ if isempty(ctx)
     ctx = localInitContext();
 end
 
+entryState = ctx.state;
+entryPhase = ctx.phase;
+
 gripperStatus = 0;
 currentConfig = ctx.lastArmQ;
 stop = false;
@@ -54,26 +57,27 @@ switch ctx.state
 
             case "PHASE2_SHAPE"
                 queue = localPerceiveScene(rgbFrame, depthFrame, camTF, ctx);
+                queue = localFilterQueueForPhase(queue, ctx);
+                localLogQueueSummary(queue, ctx, "shape-raw");
                 if isempty(ctx.phase2Targets)
                     ctx.phase2Targets = localBuildPhase2Targets(queue, ctx);
                     ctx.phase2TargetIndex = 1;
                 end
                 [ctx, hasTarget] = localDispatchQueuedTarget(ctx.phase2Targets, ctx.phase2TargetIndex, ctx, "phase2TargetIndex");
                 if hasTarget
+                    ctx.emptyScanCount = 0;
+                    ctx.retryCount = 0;
                     localLogPhaseTarget(ctx);
                     ctx.state = "MOVE_PREGRASP";
                     return;
                 end
-                if ~isempty(ctx.phase2Targets)
-                    ctx = localAdvancePhase(ctx, "phase2 fixed-slot queue drained");
-                    return;
-                end
-                ctx = localHandleEmptyPhaseScan(ctx, "no usable phase2 slots");
+                ctx = localHandleEmptyPhaseScan(ctx, "no usable phase2 targets");
                 return;
 
             otherwise
                 queue = localPerceiveScene(rgbFrame, depthFrame, camTF, ctx);
                 queue = localFilterQueueForPhase(queue, ctx);
+                localLogQueueSummary(queue, ctx, "dynamic");
                 if isempty(queue)
                     ctx = localHandleEmptyPhaseScan(ctx, "no valid targets");
                     return;
@@ -91,12 +95,8 @@ switch ctx.state
         currentConfig = ctx.lastArmQ;
         gripperStatus = 0;
         if arrived
-            if ctx.target.source == "fixed"
-                ctx.state = "MOVE_GRASP";
-            else
-                ctx.state = "REFINE_GRASP";
-                ctx.refineCount = 0;
-            end
+            ctx.state = "REFINE_GRASP";
+            ctx.refineCount = 0;
         end
 
     case "REFINE_GRASP"
@@ -133,7 +133,7 @@ switch ctx.state
         ctx.lastArmQ = currentConfig;
         gripperStatus = 1;
         ctx.holdCount = ctx.holdCount + 1;
-        if ctx.holdCount >= max(ctx.P.closeHoldSteps, ctx.closeSequenceLength + 4)
+        if ctx.holdCount >= max(ctx.P.closeHoldSteps, ctx.closeSequenceLength + 2)
             ctx.state = "VERIFY";
             ctx.verifyCount = 0;
         end
@@ -151,13 +151,18 @@ switch ctx.state
             return;
         else
             ctx.retryCount = ctx.retryCount + 1;
-            ctx.failedTargets = localRememberPosition(ctx.failedTargets, ctx.target.position);
-            if ctx.retryCount >= ctx.P.maxTargetRetries
-                ctx.state = "MOVE_SCAN";
-                ctx.target = localEmptyTarget();
-            else
-                ctx.state = "MOVE_PREGRASP";
+            if ctx.retryCount < ctx.P.maxTargetRetries
+                [ctx, recovered] = localTryAlternateTargetPlan(ctx);
+                if recovered
+                    ctx.verifyCount = 0;
+                    ctx.refineCount = 0;
+                    return;
+                end
             end
+            fprintf('[GIVEUP] %s after %d attempts in %s\n', localTargetSummary(ctx.target), ctx.retryCount, ctx.phase);
+            ctx.failedTargets = localRememberPosition(ctx.failedTargets, ctx.target.position);
+            ctx.state = "MOVE_SCAN";
+            ctx.target = localEmptyTarget();
             ctx.verifyCount = 0;
         end
 
@@ -198,6 +203,7 @@ switch ctx.state
     otherwise
         ctx.state = "MOVE_SCAN";
 end
+ctx = localEmitTransitionDebug(ctx, entryPhase, entryState, currentConfig, gripperStatus, stop);
 end
 
 function ctx = localInitContext()
@@ -223,7 +229,7 @@ ctx.completedCount = 0;
 ctx.stepCount = 0;
 ctx.verifyCount = 0;
 ctx.refineCount = 0;
-ctx.phaseOrder = ["PHASE1_FIXED", "PHASE2_SHAPE", "PHASE3_ORIENTATION", "PHASE4_RANDOM_BIN"];
+ctx.phaseOrder = ["PHASE1_FIXED", "PHASE2_SHAPE", "PHASE3_DYNAMIC"];
 ctx.phaseIndex = 1;
 ctx.phase = ctx.phaseOrder(ctx.phaseIndex);
 ctx.target = localEmptyTarget();
@@ -234,6 +240,7 @@ ctx.phase2TargetIndex = 1;
 ctx.completedTargets = zeros(0, 3);
 ctx.failedTargets = zeros(0, 3);
 ctx.lastCameraTform = eye(4);
+fprintf('[PHASE] starting -> %s\n', ctx.phase);
 end
 
 function P = localParams()
@@ -283,9 +290,9 @@ P.class.nominalCanHeight = 0.11;
 P.class.nominalMarkerHeight = 0.03;
 P.class.nominalSpamHeight = 0.06;
 P.class.nominalCubeHeight = 0.045;
-P.motion.scanStep = 0.05;
-P.motion.travelStep = 0.06;
-P.motion.graspStep = 0.025;
+P.motion.scanStep = 0.08;
+P.motion.travelStep = 0.09;
+P.motion.graspStep = 0.04;
 P.motion.arriveTol = 0.025;
 P.motion.graspTol = 0.015;
 P.motion.pregraspLift = 0.11;
@@ -298,25 +305,33 @@ P.motion.maxPregraspZ = 0.22;
 P.motion.maxLiftZ = 0.28;
 P.motion.graspBiasXY = [0.000; 0.000];
 P.motion.graspBiasZ = -0.025;
-P.closeHoldSteps = 60;
-P.openHoldSteps = 18;
-P.verifyHoldSteps = 12;
-P.scanSettlingSteps = 5;
-P.refineSettlingSteps = 4;
+P.sim.baseFixedStep = 0.01;
+P.sim.fixedStep = 0.02;
+speedScale = P.sim.fixedStep / P.sim.baseFixedStep;
+P.motion.scanStep = P.motion.scanStep * speedScale;
+P.motion.travelStep = P.motion.travelStep * speedScale;
+P.motion.graspStep = P.motion.graspStep * speedScale;
+P.closeHoldSteps = max(8, round(36 / speedScale));
+P.openHoldSteps = max(4, round(10 / speedScale));
+P.verifyHoldSteps = max(4, round(8 / speedScale));
+P.scanSettlingSteps = max(2, round(3 / speedScale));
+P.refineSettlingSteps = max(2, round(2 / speedScale));
 P.maxEmptyScans = 40;
 P.recoveryEmptyScans = 6;
-P.maxTargetRetries = 2;
+P.maxTargetRetries = 5;
 P.memoryRadius = 0.08;
 P.refineRadius = 0.12;
 P.grasp.minClearance = 0.015;
+P.retry.yawOffsets = [0, pi/2, -pi/2, pi, pi/4];
+P.retry.zOffsets = [0, 0.010, 0.010, 0.015, -0.005];
 P.phaseAdvanceEmptyScans = 8;
 P.phase2.slotMatchRadius = 0.16;
 P.phase2.x = [0.74 0.96];
-P.phase2.y = [-0.22 0.12];
-P.phase3.x = [0.32 0.72];
-P.phase3.y = [-0.24 0.18];
-P.phase4.x = [-0.02 0.56];
-P.phase4.y = [-0.76 -0.38];
+P.phase2.y = [-0.45 0.12];
+P.phase3.orientation.x = [0.32 0.72];
+P.phase3.orientation.y = [-0.24 0.18];
+P.phase3.random.x = [-0.02 0.56];
+P.phase3.random.y = [-0.76 -0.38];
 P.drop.blue = [-0.50 0.35 0.10];
 P.drop.green = [-0.50 -0.35 0.10];
 end
@@ -335,7 +350,10 @@ target = struct( ...
     "color", "unknown", ...
     "height", 0, ...
     "source", "vision", ...
-    "dropBin", "green");
+    "dropBin", "green", ...
+    "basePosition", zeros(3, 1), ...
+    "baseYaw", 0, ...
+    "variantIndex", 1);
 end
 
 function [ctx, hasTarget] = localDispatchQueuedTarget(targets, targetIndex, ctx, indexField)
@@ -487,6 +505,9 @@ for i = 1:numel(props)
     entry.height = height;
     entry.source = "vision";
     entry.dropBin = localBinForLabelColor(label, color);
+    entry.basePosition = graspPosition;
+    entry.baseYaw = graspYaw;
+    entry.variantIndex = 1;
     queue(end+1, 1) = entry; %#ok<AGROW>
 end
 
@@ -511,28 +532,20 @@ switch ctx.phase
     case "PHASE2_SHAPE"
         keep = false(numel(queue), 1);
         for idx = 1:numel(queue)
-            pos = queue(idx).position;
-            keep(idx) = any(queue(idx).label == ["can", "bottle"]) && ...
-                pos(1) >= ctx.P.phase2.x(1) && pos(1) <= ctx.P.phase2.x(2) && ...
-                pos(2) >= ctx.P.phase2.y(1) && pos(2) <= ctx.P.phase2.y(2);
+            zone = localTargetZone(queue(idx).position, ctx);
+            keep(idx) = any(queue(idx).label == ["can", "bottle"]) && any(zone == ["fixed", "shape"]);
         end
         queue = queue(keep);
 
-    case "PHASE3_ORIENTATION"
+    case "PHASE3_DYNAMIC"
         keep = false(numel(queue), 1);
         for idx = 1:numel(queue)
             pos = queue(idx).position;
-            keep(idx) = pos(1) >= ctx.P.phase3.x(1) && pos(1) <= ctx.P.phase3.x(2) && ...
-                pos(2) >= ctx.P.phase3.y(1) && pos(2) <= ctx.P.phase3.y(2);
-        end
-        queue = queue(keep);
-
-    case "PHASE4_RANDOM_BIN"
-        keep = false(numel(queue), 1);
-        for idx = 1:numel(queue)
-            pos = queue(idx).position;
-            keep(idx) = pos(1) >= ctx.P.phase4.x(1) && pos(1) <= ctx.P.phase4.x(2) && ...
-                pos(2) >= ctx.P.phase4.y(1) && pos(2) <= ctx.P.phase4.y(2);
+            inOrientation = pos(1) >= ctx.P.phase3.orientation.x(1) && pos(1) <= ctx.P.phase3.orientation.x(2) && ...
+                pos(2) >= ctx.P.phase3.orientation.y(1) && pos(2) <= ctx.P.phase3.orientation.y(2);
+            inRandom = pos(1) >= ctx.P.phase3.random.x(1) && pos(1) <= ctx.P.phase3.random.x(2) && ...
+                pos(2) >= ctx.P.phase3.random.y(1) && pos(2) <= ctx.P.phase3.random.y(2);
+            keep(idx) = inOrientation || inRandom;
         end
         queue = queue(keep);
 end
@@ -1087,39 +1100,28 @@ end
 
 function targets = localBuildPhase2Targets(queue, ctx)
 slotTable = [ ...
-    0.80 -0.40 0.15 0.0; ...
-    0.85  0.00 0.24 0.0; ...
-    0.90 -0.15 0.08 0.0; ...
-    0.93  0.05 0.15 0.0];
-slotMode = ["vertical", "vertical", "horizontal", "vertical"];
+    0.22 0.36 0.15  pi/2; ...
+    0.02 0.32 0.08  pi/2; ...
+   -0.15 0.41 0.08  pi; ...
+   -0.23 0.17 0.08 -pi/2];
+slotMode = ["vertical", "horizontal", "vertical", "vertical"];
 
 targets = repmat(struct("enabled", false, "target", localEmptyTarget()), 0, 1);
 if isempty(queue)
     return;
 end
 
-used = false(numel(queue), 1);
-seedQ = ctx.homeQ;
-for k = 1:size(slotTable, 1)
-    slotXY = slotTable(k, 1:2)';
-    bestIdx = 0;
-    bestDist = inf;
-    for i = 1:numel(queue)
-        if used(i)
-            continue;
-        end
-        distXY = norm(queue(i).position(1:2) - slotXY);
-        if distXY < bestDist
-            bestDist = distXY;
-            bestIdx = i;
-        end
-    end
-    if bestIdx == 0 || bestDist > ctx.P.phase2.slotMatchRadius
-        continue;
-    end
+shapeQueue = queue;
+if isempty(shapeQueue)
+    return;
+end
 
-    used(bestIdx) = true;
-    obs = queue(bestIdx);
+[~, order] = sort(arrayfun(@(q) q.position(1), shapeQueue), "descend");
+shapeQueue = shapeQueue(order);
+seedQ = ctx.homeQ;
+numSlots = min(size(slotTable, 1), numel(shapeQueue));
+for k = 1:numSlots
+    obs = shapeQueue(k);
     zPick = slotTable(k, 3);
     if slotMode(k) == "vertical"
         if obs.label == "bottle"
@@ -1133,6 +1135,8 @@ for k = 1:size(slotTable, 1)
     binName = localBinForLabelColor(obs.label, obs.color);
     target = localBuildFixedTargetFromPose(poseRow, obs.label, obs.color, binName, seedQ, ctx);
     if any(target.qGrasp)
+        target.source = "phase2";
+        target.score = target.score + 50 - k;
         entry.enabled = true;
         entry.target = target;
         targets(end+1, 1) = entry; %#ok<AGROW>
@@ -1176,6 +1180,9 @@ target.color = color;
 target.height = localEffectiveHeightForGrasp(ctx.P.class.nominalCanHeight, label, ctx.P);
 target.source = "fixed";
 target.dropBin = binName;
+target.basePosition = graspPosition;
+target.baseYaw = yaw;
+target.variantIndex = 1;
 end
 
 function qDrop = localDropQForBin(binName, ctx)
@@ -1216,11 +1223,11 @@ function ctx = localHandleEmptyPhaseScan(ctx, reason)
 ctx.emptyScanCount = ctx.emptyScanCount + 1;
 fprintf('[SCAN] %s %s at step %d (empty=%d)\n', lower(char(ctx.phase)), reason, ctx.stepCount, ctx.emptyScanCount);
 
-if ctx.phase ~= "PHASE4_RANDOM_BIN" && ctx.emptyScanCount >= ctx.P.phaseAdvanceEmptyScans
+if ctx.phase ~= "PHASE3_DYNAMIC" && ctx.emptyScanCount >= ctx.P.phaseAdvanceEmptyScans
     ctx = localAdvancePhase(ctx, "phase exhausted");
     return;
 end
-if ctx.phase == "PHASE4_RANDOM_BIN" && ctx.emptyScanCount >= ctx.P.maxEmptyScans
+if ctx.phase == "PHASE3_DYNAMIC" && ctx.emptyScanCount >= ctx.P.maxEmptyScans
     ctx.state = "STOP";
     return;
 end
@@ -1245,10 +1252,115 @@ end
 end
 
 function localLogPhaseTarget(ctx)
-fprintf('[TARGET][%s] %s %s score=%.2f pos=[%.3f %.3f %.3f] h=%.3f grasp=[%.3f %.3f %.3f] yaw=%.2f\n', ...
-    ctx.phase, ctx.target.color, ctx.target.label, ctx.target.score, ...
+fprintf('[TARGET][%s][%s] %s %s score=%.2f pos=[%.3f %.3f %.3f] h=%.3f grasp=[%.3f %.3f %.3f] yaw=%.2f drop=%s source=%s\n', ...
+    ctx.phase, localTargetZone(ctx.target.position, ctx), ...
+    ctx.target.color, ctx.target.label, ctx.target.score, ...
     ctx.target.position(1), ctx.target.position(2), ctx.target.position(3), ctx.target.height, ...
-    ctx.target.graspPosition(1), ctx.target.graspPosition(2), ctx.target.graspPosition(3), ctx.target.graspYaw);
+    ctx.target.graspPosition(1), ctx.target.graspPosition(2), ctx.target.graspPosition(3), ctx.target.graspYaw, ...
+    ctx.target.dropBin, ctx.target.source);
+end
+
+function ctx = localEmitTransitionDebug(ctx, entryPhase, entryState, currentConfig, gripperStatus, stop)
+if ctx.phase ~= entryPhase
+    fprintf('[DEBUG] phase=%s step=%d completed=%d empty=%d retries=%d\n', ...
+        ctx.phase, ctx.stepCount, ctx.completedCount, ctx.emptyScanCount, ctx.retryCount);
+end
+
+if ctx.state ~= entryState
+    q = currentConfig(:);
+    fprintf('[STATE] %s -> %s @ step=%d phase=%s grip=%d stop=%d q=[%.2f %.2f %.2f %.2f %.2f %.2f] target=%s\n', ...
+        entryState, ctx.state, ctx.stepCount, ctx.phase, gripperStatus, stop, ...
+        q(1), q(2), q(3), q(4), q(5), q(6), localTargetSummary(ctx.target));
+end
+
+if mod(ctx.stepCount, 100) == 0
+    fprintf('[HEARTBEAT] step=%d phase=%s state=%s scanIdx=%d completed=%d target=%s\n', ...
+        ctx.stepCount, ctx.phase, ctx.state, ctx.scanTargetIndex, ctx.completedCount, localTargetSummary(ctx.target));
+end
+end
+
+function localLogQueueSummary(queue, ctx, tag)
+if isempty(queue)
+    fprintf('[QUEUE][%s][%s] count=0\n', ctx.phase, tag);
+    return;
+end
+
+n = min(numel(queue), 3);
+parts = strings(1, n);
+for k = 1:n
+    parts(k) = sprintf('%s/%s:%.1f@%s', queue(k).color, queue(k).label, queue(k).score, localTargetZone(queue(k).position, ctx));
+end
+fprintf('[QUEUE][%s][%s] count=%d top=%s\n', ctx.phase, tag, numel(queue), strjoin(parts, ' | '));
+end
+
+function summary = localTargetSummary(target)
+if isempty(target) || (target.label == "unknown" && target.color == "unknown")
+    summary = "none";
+    return;
+end
+summary = sprintf('%s/%s/%s', target.color, target.label, target.source);
+end
+
+function [ctx, recovered] = localTryAlternateTargetPlan(ctx)
+recovered = false;
+basePos = ctx.target.basePosition(:);
+qSeed = ctx.lastArmQ;
+
+for variant = (ctx.target.variantIndex + 1):numel(ctx.P.retry.yawOffsets)
+    yaw = wrapToPi(ctx.target.baseYaw + ctx.P.retry.yawOffsets(variant));
+    graspPosition = basePos;
+    graspPosition(3) = min(max(basePos(3) + ctx.P.retry.zOffsets(variant), ctx.P.motion.minGraspZ), ctx.P.motion.maxGraspZ);
+
+    prePosition = graspPosition + [0; 0; ctx.P.motion.pregraspLift];
+    liftPosition = graspPosition + [0; 0; ctx.P.motion.postLift];
+    prePosition(3) = min(prePosition(3), ctx.P.motion.maxPregraspZ);
+    liftPosition(3) = min(liftPosition(3), ctx.P.motion.maxLiftZ);
+
+    Tgrasp = localMakeT(graspPosition + [0; 0; ctx.P.motion.graspClearance], yaw);
+    Tpre = localMakeT(prePosition, yaw);
+    Tlift = localMakeT(liftPosition, yaw);
+
+    [qPre, okPre] = localSolveIk(ctx, Tpre, qSeed);
+    [qGrasp, okGrasp] = localSolveIk(ctx, Tgrasp, qPre);
+    [qLift, okLift] = localSolveIk(ctx, Tlift, qGrasp);
+    if ~(okPre && okGrasp && okLift)
+        continue;
+    end
+
+    ctx.target.qPre = qPre;
+    ctx.target.qGrasp = qGrasp;
+    ctx.target.qLift = qLift;
+    ctx.target.graspPosition = graspPosition;
+    ctx.target.graspYaw = yaw;
+    ctx.target.variantIndex = variant;
+    ctx.state = "MOVE_PREGRASP";
+    fprintf('[RECOVER] %s variant=%d yaw=%.2f z=%.3f\n', localTargetSummary(ctx.target), variant, yaw, graspPosition(3));
+    recovered = true;
+    return;
+end
+end
+
+function zone = localTargetZone(position, ctx)
+pos = position(:);
+if numel(pos) ~= 3
+    zone = "unknown";
+    return;
+end
+
+if pos(1) >= ctx.P.phase2.x(1) && pos(1) <= ctx.P.phase2.x(2) && ...
+        pos(2) >= ctx.P.phase2.y(1) && pos(2) <= ctx.P.phase2.y(2)
+    zone = "shape";
+elseif pos(1) >= ctx.P.phase3.orientation.x(1) && pos(1) <= ctx.P.phase3.orientation.x(2) && ...
+        pos(2) >= ctx.P.phase3.orientation.y(1) && pos(2) <= ctx.P.phase3.orientation.y(2)
+    zone = "orientation";
+elseif pos(1) >= ctx.P.phase3.random.x(1) && pos(1) <= ctx.P.phase3.random.x(2) && ...
+        pos(2) >= ctx.P.phase3.random.y(1) && pos(2) <= ctx.P.phase3.random.y(2)
+    zone = "random";
+elseif pos(1) > 0 && pos(2) > 0
+    zone = "fixed";
+else
+    zone = "other";
+end
 end
 
 function tf = localMakeT(position, yaw)
