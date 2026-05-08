@@ -41,48 +41,62 @@ switch ctx.state
             return;
         end
 
-        queue = localPerceiveScene(rgbFrame, depthFrame, camTF, ctx);
-        if isempty(queue)
-            ctx.emptyScanCount = ctx.emptyScanCount + 1;
-            fprintf('[SCAN] no valid targets at step %d (empty=%d)\n', ctx.stepCount, ctx.emptyScanCount);
-            if ctx.emptyScanCount >= ctx.P.maxEmptyScans && ctx.completedCount > 0
-                ctx.state = "STOP";
-            elseif ctx.emptyScanCount >= ctx.P.recoveryEmptyScans
-                ctx.failedTargets = zeros(0, 3);
-                ctx.retryCount = 0;
-                ctx.emptyScanCount = 0;
-                ctx.scanTargetIndex = 1;
-                ctx.scanDirection = 1;
-                ctx.settleCount = 0;
-                ctx.state = "MOVE_SCAN";
-            else
-                nextIdx = ctx.scanTargetIndex + ctx.scanDirection;
-                if nextIdx > size(ctx.scanSweepQs, 2) || nextIdx < 1
-                    ctx.scanDirection = -ctx.scanDirection;
-                    nextIdx = ctx.scanTargetIndex + ctx.scanDirection;
+        switch ctx.phase
+            case "PHASE1_FIXED"
+                [ctx, hasTarget] = localDispatchQueuedTarget(ctx.phase1Targets, ctx.phase1TargetIndex, ctx, "phase1TargetIndex");
+                if hasTarget
+                    localLogPhaseTarget(ctx);
+                    ctx.state = "MOVE_PREGRASP";
+                    return;
                 end
-                ctx.scanTargetIndex = nextIdx;
-                ctx.state = "MOVE_SCAN";
-            end
-            return;
-        end
+                ctx = localAdvancePhase(ctx, "phase1 queue drained");
+                return;
 
-        ctx.emptyScanCount = 0;
-        ctx.retryCount = 0;
-        ctx.target = queue(1);
-        fprintf('[TARGET] %s %s score=%.2f pos=[%.3f %.3f %.3f] h=%.3f grasp=[%.3f %.3f %.3f] yaw=%.2f\n', ...
-            ctx.target.color, ctx.target.label, ctx.target.score, ...
-            ctx.target.position(1), ctx.target.position(2), ctx.target.position(3), ctx.target.height, ...
-            ctx.target.graspPosition(1), ctx.target.graspPosition(2), ctx.target.graspPosition(3), ctx.target.graspYaw);
-        ctx.state = "MOVE_PREGRASP";
+            case "PHASE2_SHAPE"
+                queue = localPerceiveScene(rgbFrame, depthFrame, camTF, ctx);
+                if isempty(ctx.phase2Targets)
+                    ctx.phase2Targets = localBuildPhase2Targets(queue, ctx);
+                    ctx.phase2TargetIndex = 1;
+                end
+                [ctx, hasTarget] = localDispatchQueuedTarget(ctx.phase2Targets, ctx.phase2TargetIndex, ctx, "phase2TargetIndex");
+                if hasTarget
+                    localLogPhaseTarget(ctx);
+                    ctx.state = "MOVE_PREGRASP";
+                    return;
+                end
+                if ~isempty(ctx.phase2Targets)
+                    ctx = localAdvancePhase(ctx, "phase2 fixed-slot queue drained");
+                    return;
+                end
+                ctx = localHandleEmptyPhaseScan(ctx, "no usable phase2 slots");
+                return;
+
+            otherwise
+                queue = localPerceiveScene(rgbFrame, depthFrame, camTF, ctx);
+                queue = localFilterQueueForPhase(queue, ctx);
+                if isempty(queue)
+                    ctx = localHandleEmptyPhaseScan(ctx, "no valid targets");
+                    return;
+                end
+
+                ctx.emptyScanCount = 0;
+                ctx.retryCount = 0;
+                ctx.target = queue(1);
+                localLogPhaseTarget(ctx);
+                ctx.state = "MOVE_PREGRASP";
+        end
 
     case "MOVE_PREGRASP"
         [ctx.lastArmQ, arrived] = localStepArm(ctx.lastArmQ, ctx.target.qPre, ctx.P.motion.travelStep, ctx.P.motion.arriveTol);
         currentConfig = ctx.lastArmQ;
         gripperStatus = 0;
         if arrived
-            ctx.state = "REFINE_GRASP";
-            ctx.refineCount = 0;
+            if ctx.target.source == "fixed"
+                ctx.state = "MOVE_GRASP";
+            else
+                ctx.state = "REFINE_GRASP";
+                ctx.refineCount = 0;
+            end
         end
 
     case "REFINE_GRASP"
@@ -209,7 +223,14 @@ ctx.completedCount = 0;
 ctx.stepCount = 0;
 ctx.verifyCount = 0;
 ctx.refineCount = 0;
+ctx.phaseOrder = ["PHASE1_FIXED", "PHASE2_SHAPE", "PHASE3_ORIENTATION", "PHASE4_RANDOM_BIN"];
+ctx.phaseIndex = 1;
+ctx.phase = ctx.phaseOrder(ctx.phaseIndex);
 ctx.target = localEmptyTarget();
+ctx.phase1Targets = localBuildPhase1Targets(ctx);
+ctx.phase1TargetIndex = 1;
+ctx.phase2Targets = repmat(struct("enabled", false, "target", localEmptyTarget()), 0, 1);
+ctx.phase2TargetIndex = 1;
 ctx.completedTargets = zeros(0, 3);
 ctx.failedTargets = zeros(0, 3);
 ctx.lastCameraTform = eye(4);
@@ -288,6 +309,14 @@ P.maxTargetRetries = 2;
 P.memoryRadius = 0.08;
 P.refineRadius = 0.12;
 P.grasp.minClearance = 0.015;
+P.phaseAdvanceEmptyScans = 8;
+P.phase2.slotMatchRadius = 0.16;
+P.phase2.x = [0.74 0.96];
+P.phase2.y = [-0.22 0.12];
+P.phase3.x = [0.32 0.72];
+P.phase3.y = [-0.24 0.18];
+P.phase4.x = [-0.02 0.56];
+P.phase4.y = [-0.76 -0.38];
 P.drop.blue = [-0.50 0.35 0.10];
 P.drop.green = [-0.50 -0.35 0.10];
 end
@@ -304,7 +333,27 @@ target = struct( ...
     "score", -inf, ...
     "label", "unknown", ...
     "color", "unknown", ...
-    "height", 0);
+    "height", 0, ...
+    "source", "vision", ...
+    "dropBin", "green");
+end
+
+function [ctx, hasTarget] = localDispatchQueuedTarget(targets, targetIndex, ctx, indexField)
+hasTarget = false;
+
+while targetIndex <= numel(targets)
+    candidate = targets(targetIndex);
+    targetIndex = targetIndex + 1;
+    if ~candidate.enabled
+        continue;
+    end
+    ctx.target = candidate.target;
+    ctx.(indexField) = targetIndex;
+    ctx.retryCount = 0;
+    hasTarget = true;
+    return;
+end
+ctx.(indexField) = targetIndex;
 end
 
 function scanGoal = localCurrentScanGoal(ctx)
@@ -436,6 +485,8 @@ for i = 1:numel(props)
     entry.label = label;
     entry.color = color;
     entry.height = height;
+    entry.source = "vision";
+    entry.dropBin = localBinForLabelColor(label, color);
     queue(end+1, 1) = entry; %#ok<AGROW>
 end
 
@@ -449,6 +500,42 @@ end
 queue = queue(order);
 fprintf('[PERCEPTION] rgbPx=%d depthPx=%d blobs=%d graspable=%d pose=%d ws=%d self=%d mem=%d unsafe=%d ik=%d\n', ...
     nnz(maskRgb), nnz(maskDepth), rawCandidates, numel(queue), rejectPose, rejectWorkspace, rejectSelf, rejectMemory, softUnsafe, rejectIK);
+end
+
+function queue = localFilterQueueForPhase(queue, ctx)
+if isempty(queue)
+    return;
+end
+
+switch ctx.phase
+    case "PHASE2_SHAPE"
+        keep = false(numel(queue), 1);
+        for idx = 1:numel(queue)
+            pos = queue(idx).position;
+            keep(idx) = any(queue(idx).label == ["can", "bottle"]) && ...
+                pos(1) >= ctx.P.phase2.x(1) && pos(1) <= ctx.P.phase2.x(2) && ...
+                pos(2) >= ctx.P.phase2.y(1) && pos(2) <= ctx.P.phase2.y(2);
+        end
+        queue = queue(keep);
+
+    case "PHASE3_ORIENTATION"
+        keep = false(numel(queue), 1);
+        for idx = 1:numel(queue)
+            pos = queue(idx).position;
+            keep(idx) = pos(1) >= ctx.P.phase3.x(1) && pos(1) <= ctx.P.phase3.x(2) && ...
+                pos(2) >= ctx.P.phase3.y(1) && pos(2) <= ctx.P.phase3.y(2);
+        end
+        queue = queue(keep);
+
+    case "PHASE4_RANDOM_BIN"
+        keep = false(numel(queue), 1);
+        for idx = 1:numel(queue)
+            pos = queue(idx).position;
+            keep(idx) = pos(1) >= ctx.P.phase4.x(1) && pos(1) <= ctx.P.phase4.x(2) && ...
+                pos(2) >= ctx.P.phase4.y(1) && pos(2) <= ctx.P.phase4.y(2);
+        end
+        queue = queue(keep);
+end
 end
 
 function mask = localObjectColorMask(rgbFrame, P)
@@ -583,7 +670,7 @@ mask = imfill(mask, "holes");
 mask = bwareafilt(mask, [P.det.minDepthBlobArea max(P.det.maxDepthBlobArea, P.det.minDepthBlobArea)]);
 end
 
-function [position, objHeight, poseOK] = localEstimatePose(prop, depthFrame, bbox, validDepth, camTF, P)
+function [position, objHeight, poseOK] = localEstimatePose(prop, depthFrame, bbox, ~, camTF, P)
 position = zeros(3, 1);
 objHeight = 0;
 poseOK = false;
@@ -839,6 +926,8 @@ function [qPre, qGrasp, qLift, graspPosition, yaw] = localPlanTarget(position, o
 if label == "marker"
     yaw = deg2rad(-orientationDeg);
     yaw = (pi / 2) * round(yaw / (pi / 2));
+elseif any(label == ["bottle", "can", "spam"]) && objHeight < ctx.P.class.uprightCanHeight
+    yaw = deg2rad(90 - orientationDeg);
 else
     yaw = 0;
 end
@@ -879,18 +968,27 @@ end
 end
 
 function qDrop = localDropTarget(label, color, ctx)
-if label == "bottle" || label == "marker"
+binName = localBinForLabelColor(label, color);
+if binName == "blue"
     qDrop = ctx.blueDropQ;
-elseif label == "cube"
-    if color == "blue" || color == "red"
-        qDrop = ctx.blueDropQ;
-    else
-        qDrop = ctx.greenDropQ;
-    end
-elseif label == "spam" || label == "can"
-    qDrop = ctx.greenDropQ;
 else
     qDrop = ctx.greenDropQ;
+end
+end
+
+function binName = localBinForLabelColor(label, color)
+if label == "bottle" || label == "marker"
+    binName = "blue";
+elseif label == "cube"
+    if color == "blue" || color == "red"
+        binName = "blue";
+    else
+        binName = "green";
+    end
+elseif label == "spam" || label == "can"
+    binName = "green";
+else
+    binName = "green";
 end
 end
 
@@ -959,6 +1057,198 @@ end
 scale = min(maxStep / max(dist, 1e-9), 1.0);
 nextQ = currentQ(:) + scale * delta;
 arrived = false;
+end
+
+function fixedTargets = localBuildPhase1Targets(ctx)
+fixedPoseTable = [ ...
+    0.20 0.40 0.15  0.0; ...
+    0.20 0.60 0.08  0.0; ...
+    0.20 0.70 0.07  pi/2; ...
+    0.30 0.70 0.08  pi/2; ...
+    0.40 0.60 0.15  0.0; ...
+    0.60 0.60 0.07  pi/4];
+fixedLabels = ["can", "bottle", "marker", "bottle", "can", "spam"];
+fixedColors = ["green", "red", "black", "yellow", "green", "white"];
+fixedBins = ["green", "blue", "blue", "blue", "green", "green"];
+
+fixedTargets = repmat(struct("enabled", false, "target", localEmptyTarget()), numel(fixedLabels), 1);
+seedQ = ctx.homeQ;
+for k = 1:numel(fixedLabels)
+    target = localBuildFixedTargetFromPose(fixedPoseTable(k, :), fixedLabels(k), fixedColors(k), fixedBins(k), seedQ, ctx);
+    fixedTargets(k).enabled = any(target.qGrasp);
+    fixedTargets(k).target = target;
+    if fixedTargets(k).enabled
+        seedQ = target.qDrop;
+    else
+        fprintf('[FIXED] skipped target %d because IK could not be planned\n', k);
+    end
+end
+end
+
+function targets = localBuildPhase2Targets(queue, ctx)
+slotTable = [ ...
+    0.80 -0.40 0.15 0.0; ...
+    0.85  0.00 0.24 0.0; ...
+    0.90 -0.15 0.08 0.0; ...
+    0.93  0.05 0.15 0.0];
+slotMode = ["vertical", "vertical", "horizontal", "vertical"];
+
+targets = repmat(struct("enabled", false, "target", localEmptyTarget()), 0, 1);
+if isempty(queue)
+    return;
+end
+
+used = false(numel(queue), 1);
+seedQ = ctx.homeQ;
+for k = 1:size(slotTable, 1)
+    slotXY = slotTable(k, 1:2)';
+    bestIdx = 0;
+    bestDist = inf;
+    for i = 1:numel(queue)
+        if used(i)
+            continue;
+        end
+        distXY = norm(queue(i).position(1:2) - slotXY);
+        if distXY < bestDist
+            bestDist = distXY;
+            bestIdx = i;
+        end
+    end
+    if bestIdx == 0 || bestDist > ctx.P.phase2.slotMatchRadius
+        continue;
+    end
+
+    used(bestIdx) = true;
+    obs = queue(bestIdx);
+    zPick = slotTable(k, 3);
+    if slotMode(k) == "vertical"
+        if obs.label == "bottle"
+            zPick = 0.24;
+        elseif obs.label == "can"
+            zPick = 0.15;
+        end
+    end
+
+    poseRow = [slotTable(k, 1), slotTable(k, 2), zPick, slotTable(k, 4)];
+    binName = localBinForLabelColor(obs.label, obs.color);
+    target = localBuildFixedTargetFromPose(poseRow, obs.label, obs.color, binName, seedQ, ctx);
+    if any(target.qGrasp)
+        entry.enabled = true;
+        entry.target = target;
+        targets(end+1, 1) = entry; %#ok<AGROW>
+        seedQ = target.qDrop;
+    end
+end
+end
+
+function target = localBuildFixedTargetFromPose(poseRow, label, color, binName, qSeed, ctx)
+target = localEmptyTarget();
+graspPosition = poseRow(1:3)';
+yaw = poseRow(4);
+
+prePosition = graspPosition + [0; 0; ctx.P.motion.pregraspLift];
+liftPosition = graspPosition + [0; 0; ctx.P.motion.postLift];
+prePosition(3) = min(prePosition(3), ctx.P.motion.maxPregraspZ);
+liftPosition(3) = min(liftPosition(3), ctx.P.motion.maxLiftZ);
+
+Tgrasp = localMakeT(graspPosition + [0; 0; ctx.P.motion.graspClearance], yaw);
+Tpre = localMakeT(prePosition, yaw);
+Tlift = localMakeT(liftPosition, yaw);
+
+[qPre, okPre] = localSolveIk(ctx, Tpre, qSeed);
+[qGrasp, okGrasp] = localSolveIk(ctx, Tgrasp, qPre);
+[qLift, okLift] = localSolveIk(ctx, Tlift, qGrasp);
+
+if ~(okPre && okGrasp && okLift)
+    return;
+end
+
+target.position = graspPosition;
+target.qPre = qPre;
+target.qGrasp = qGrasp;
+target.qLift = qLift;
+target.qDrop = localDropQForBin(binName, ctx);
+target.graspPosition = graspPosition;
+target.graspYaw = yaw;
+target.score = localPointValue(label, color) + 100;
+target.label = label;
+target.color = color;
+target.height = localEffectiveHeightForGrasp(ctx.P.class.nominalCanHeight, label, ctx.P);
+target.source = "fixed";
+target.dropBin = binName;
+end
+
+function qDrop = localDropQForBin(binName, ctx)
+if binName == "blue"
+    qDrop = ctx.blueDropQ;
+else
+    qDrop = ctx.greenDropQ;
+end
+end
+
+function ctx = localAdvancePhase(ctx, reason)
+oldPhase = ctx.phase;
+ctx.phaseIndex = ctx.phaseIndex + 1;
+ctx.emptyScanCount = 0;
+ctx.retryCount = 0;
+ctx.failedTargets = zeros(0, 3);
+ctx.target = localEmptyTarget();
+ctx.scanTargetIndex = 1;
+ctx.scanDirection = 1;
+ctx.settleCount = 0;
+
+if ctx.phaseIndex > numel(ctx.phaseOrder)
+    fprintf('[PHASE] %s complete -> stopping (%s)\n', oldPhase, reason);
+    ctx.state = "STOP";
+    return;
+end
+
+ctx.phase = ctx.phaseOrder(ctx.phaseIndex);
+if ctx.phase == "PHASE2_SHAPE"
+    ctx.phase2Targets = repmat(struct("enabled", false, "target", localEmptyTarget()), 0, 1);
+    ctx.phase2TargetIndex = 1;
+end
+fprintf('[PHASE] %s complete -> %s (%s)\n', oldPhase, ctx.phase, reason);
+ctx.state = "MOVE_SCAN";
+end
+
+function ctx = localHandleEmptyPhaseScan(ctx, reason)
+ctx.emptyScanCount = ctx.emptyScanCount + 1;
+fprintf('[SCAN] %s %s at step %d (empty=%d)\n', lower(char(ctx.phase)), reason, ctx.stepCount, ctx.emptyScanCount);
+
+if ctx.phase ~= "PHASE4_RANDOM_BIN" && ctx.emptyScanCount >= ctx.P.phaseAdvanceEmptyScans
+    ctx = localAdvancePhase(ctx, "phase exhausted");
+    return;
+end
+if ctx.phase == "PHASE4_RANDOM_BIN" && ctx.emptyScanCount >= ctx.P.maxEmptyScans
+    ctx.state = "STOP";
+    return;
+end
+
+if ctx.emptyScanCount >= ctx.P.recoveryEmptyScans
+    ctx.failedTargets = zeros(0, 3);
+    ctx.retryCount = 0;
+    ctx.emptyScanCount = 0;
+    ctx.scanTargetIndex = 1;
+    ctx.scanDirection = 1;
+    ctx.settleCount = 0;
+    ctx.state = "MOVE_SCAN";
+else
+    nextIdx = ctx.scanTargetIndex + ctx.scanDirection;
+    if nextIdx > size(ctx.scanSweepQs, 2) || nextIdx < 1
+        ctx.scanDirection = -ctx.scanDirection;
+        nextIdx = ctx.scanTargetIndex + ctx.scanDirection;
+    end
+    ctx.scanTargetIndex = nextIdx;
+    ctx.state = "MOVE_SCAN";
+end
+end
+
+function localLogPhaseTarget(ctx)
+fprintf('[TARGET][%s] %s %s score=%.2f pos=[%.3f %.3f %.3f] h=%.3f grasp=[%.3f %.3f %.3f] yaw=%.2f\n', ...
+    ctx.phase, ctx.target.color, ctx.target.label, ctx.target.score, ...
+    ctx.target.position(1), ctx.target.position(2), ctx.target.position(3), ctx.target.height, ...
+    ctx.target.graspPosition(1), ctx.target.graspPosition(2), ctx.target.graspPosition(3), ctx.target.graspYaw);
 end
 
 function tf = localMakeT(position, yaw)
@@ -1046,7 +1336,7 @@ end
 end
 
 function tf = localRememberPosition(tf, position)
-tf(end+1, :) = position(:)'; %#ok<AGROW>
+tf(end+1, :) = position(:)';
 end
 
 function tf = localNearMemory(position, memory, radius)
