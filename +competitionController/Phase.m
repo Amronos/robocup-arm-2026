@@ -51,11 +51,11 @@ classdef Phase
             fprintf('[SCAN] %s %s at step %d (empty=%d)\n', ...
                 lower(char(ctx.phase)), reason, ctx.stepCount, ctx.emptyScanCount);
 
-            if ctx.phase ~= "PHASE3_DYNAMIC" && ctx.emptyScanCount >= ctx.P.phaseAdvanceEmptyScans
+            if ctx.phase ~= "PHASE4_RANDOM" && ctx.emptyScanCount >= ctx.P.phaseAdvanceEmptyScans
                 ctx = competitionController.Phase.advancePhase(ctx, "phase exhausted");
                 return;
             end
-            if ctx.phase == "PHASE3_DYNAMIC" && ctx.emptyScanCount >= ctx.P.maxEmptyScans
+            if ctx.phase == "PHASE4_RANDOM" && ctx.emptyScanCount >= ctx.P.maxEmptyScans
                 ctx.state = "STOP";
                 return;
             end
