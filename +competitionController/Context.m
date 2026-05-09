@@ -127,7 +127,7 @@ classdef Context
             P.memoryRadius = 0.08;
             P.refineRadius = 0.12;
             P.grasp.minClearance = 0.015;
-            P.retry.yawOffsets = [0, pi / 8, -pi / 8, pi / 6, -pi / 6];
+            P.retry.yawOffsets = [0, pi / 2, -pi / 2, pi];
             P.retry.zOffsets = [0, 0, 0, 0, 0];
             P.phaseAdvanceEmptyScans = 8;
             P.phase1.matchRadius = 0.10;
