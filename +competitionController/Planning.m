@@ -49,7 +49,6 @@ classdef Planning
             target.qGrasp = qGrasp;
             target.qLift = qLift;
             target.qRotate = qLift;
-            target.qDrop = competitionController.Planning.dropQForBin(binName, ctx);
             target.graspPosition = graspPosition;
             target.graspYaw = yaw;
             target.score = competitionController.Planning.pointValue(label, color) + 100;
@@ -61,6 +60,7 @@ classdef Planning
             target.basePosition = graspPosition;
             target.baseYaw = yaw;
             target.variantIndex = 1;
+            target.qDrop = competitionController.Planning.dropQForBin(binName, ctx);
         end
 
         function target = buildPhase1FixedTargetFromPose(poseRow, label, color, binName, ctx)
@@ -78,7 +78,6 @@ classdef Planning
             target.qGrasp = qGrasp;
             target.qLift = qLift;
             target.qRotate = qLift;
-            target.qDrop = competitionController.Planning.dropQForBin(binName, ctx);
             target.graspPosition = graspPosition;
             target.graspYaw = yaw;
             target.score = competitionController.Planning.pointValue(label, color) + 100;
@@ -90,6 +89,7 @@ classdef Planning
             target.basePosition = graspPosition;
             target.baseYaw = yaw;
             target.variantIndex = 1;
+            target.qDrop = competitionController.Planning.dropQForBin(binName, ctx);
         end
 
         function target = buildPhase3FixedTargetFromPose(poseRow, label, color, binName, ctx)
@@ -107,7 +107,6 @@ classdef Planning
             target.qGrasp = qGrasp;
             target.qLift = qLift;
             target.qRotate = qLift;
-            target.qDrop = competitionController.Planning.dropQForBin(binName, ctx);
             target.graspPosition = graspPosition;
             target.graspYaw = yaw;
             target.score = competitionController.Planning.pointValue(label, color) + 100;
@@ -119,6 +118,7 @@ classdef Planning
             target.basePosition = graspPosition;
             target.baseYaw = yaw;
             target.variantIndex = 1;
+            target.qDrop = competitionController.Planning.dropQForBin(binName, ctx);
         end
 
         function [qPre, qGrasp, qLift, ok] = planPhase3FixedPose(ctx, graspPosition, yaw)
@@ -269,9 +269,13 @@ classdef Planning
         function [ctx, recovered] = tryAlternateTargetPlan(ctx)
             recovered = false;
             basePos = ctx.target.basePosition(:);
+            yawOffsets = ctx.P.retry.yawOffsets;
+            if ctx.phase == "PHASE3_ORIENTATION" && ctx.target.source == "phase3-fixed"
+                yawOffsets = ctx.P.phase3.retryYawOffsets;
+            end
 
-            for variant = (ctx.target.variantIndex + 1):numel(ctx.P.retry.yawOffsets)
-                yaw = wrapToPi(ctx.target.baseYaw + ctx.P.retry.yawOffsets(variant));
+            for variant = (ctx.target.variantIndex + 1):numel(yawOffsets)
+                yaw = wrapToPi(ctx.target.baseYaw + yawOffsets(variant));
                 graspPosition = basePos;
                 isFixedTarget = any(ctx.target.source == ["phase1-fixed", "phase3-fixed"]);
                 if isFixedTarget
@@ -396,7 +400,7 @@ classdef Planning
                     qSeedFull = [qSeedArm(:)' zeros(1, 6)];
                     [qSol, info] = ctx.ik("tool0", trial, [0.25 0.25 0.25 1 1 1], qSeedFull);
                     if strcmpi(info.Status, "success") || info.PoseErrorNorm < 5e-3
-                        qArm = qSol(1:6)';
+                        qArm = competitionController.Context.normalizeArmQ(qSol(1:6)');
                         qArm = qArm(:);
                         ok = true;
                         return;
@@ -411,7 +415,7 @@ classdef Planning
             qSeedFull = [qSeedArm(:)' zeros(1, 6)];
             [qSol, info] = ctx.ik("tool0", targetTform, [0.25 0.25 0.25 1 1 1], qSeedFull);
             if strcmpi(info.Status, "success") || info.PoseErrorNorm < 5e-3
-                qArm = qSol(1:6)';
+                qArm = competitionController.Context.normalizeArmQ(qSol(1:6)');
                 qArm = qArm(:);
                 ok = true;
             end
@@ -456,12 +460,13 @@ classdef Planning
             greenTform(2, 4) = -blueTform(2, 4);
             [qSol, info] = ikSolver("tool0", greenTform, [0.25 0.25 0.25 1 1 1], qBlueFull);
             if strcmpi(info.Status, "success") || info.PoseErrorNorm < 5e-3
-                qGreen = qSol(1:6)';
+                qGreen = competitionController.Context.normalizeArmQ(qSol(1:6)');
                 qGreen = qGreen(:);
             else
-                qGreen = qBlue(:);
+                qGreen = competitionController.Context.normalizeArmQ(qBlue(:));
                 qGreen(1) = wrapToPi(qGreen(1) + pi / 2);
             end
         end
+
     end
 end
