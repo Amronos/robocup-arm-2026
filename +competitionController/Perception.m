@@ -98,6 +98,8 @@ classdef Perception
                 entry.qPre = qPre;
                 entry.qGrasp = qGrasp;
                 entry.qLift = qLift;
+                entry.qDrop = competitionController.Planning.dropQForBin( ...
+                    competitionController.Planning.binForLabelColor(label, color), ctx);
                 entry.graspPosition = graspPosition;
                 entry.graspYaw = graspYaw;
                 entry.score = competitionController.Planning.pointValue(label, color) * graspScore;
@@ -110,7 +112,6 @@ classdef Perception
                 entry.baseYaw = graspYaw;
                 entry.variantIndex = 1;
                 entry.qRotate = qLift;
-                entry.qDrop = competitionController.Planning.dropQForBin(entry.dropBin, ctx);
                 queue(end + 1, 1) = entry; %#ok<AGROW>
             end
 

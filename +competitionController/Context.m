@@ -7,12 +7,11 @@ classdef Context
             ctx.P = competitionController.Context.params();
             ctx.robot = data.robot;
             ctx.ik = inverseKinematics("RigidBodyTree", ctx.robot);
-            ctx.scanQ = competitionController.Context.normalizeArmQ(data.q_marker_int1(:, 1));
+            ctx.scanQ = data.q_marker_int1(:, 1);
             ctx.scanSweepQs = competitionController.Context.buildScanSweep(ctx.scanQ);
-            ctx.blueDropQ = competitionController.Context.normalizeArmQ(data.q_retBlue1(:, end));
-            ctx.greenDropQ = competitionController.Context.normalizeArmQ( ...
-                competitionController.Planning.solveMirroredDrop(ctx.ik, ctx.robot, ctx.blueDropQ));
-            ctx.homeQ = competitionController.Context.normalizeArmQ(data.q_retBlue1(:, 1));
+            ctx.blueDropQ = data.q_retBlue1(:, end);
+            ctx.greenDropQ = competitionController.Planning.solveMirroredDrop(ctx.ik, ctx.robot, ctx.blueDropQ);
+            ctx.homeQ = data.q_retBlue1(:, 1);
             ctx.closeSequenceLength = size(data.q_grip1, 2);
             ctx.lastArmQ = ctx.homeQ;
             ctx.state = "MOVE_SCAN";
@@ -142,7 +141,6 @@ classdef Context
             P.phase1.maxGraspToLiftDelta = 1.40;
             P.phase3.matchRadius = 0.09;
             P.phase3.maxTargetRetries = 2;
-            P.phase3.retryYawOffsets = [0, pi / 2, -pi / 2];
             P.phase3.travelStep = 0.045;
             P.phase3.graspStep = 0.015;
             P.phase3.pregraspLift = 0.18;
@@ -212,9 +210,7 @@ classdef Context
         end
 
         function [nextQ, arrived] = stepArm(currentQ, targetQ, maxStep, tol)
-            currentQ = competitionController.Context.normalizeArmQ(currentQ);
-            targetQ = competitionController.Context.normalizeArmQ(targetQ);
-            delta = wrapToPi(targetQ(:) - currentQ(:));
+            delta = targetQ(:) - currentQ(:);
             dist = norm(delta);
             if dist <= tol
                 nextQ = targetQ(:);
@@ -223,7 +219,7 @@ classdef Context
             end
 
             scale = min(maxStep / max(dist, 1e-9), 1.0);
-            nextQ = competitionController.Context.normalizeArmQ(currentQ(:) + scale * delta);
+            nextQ = currentQ(:) + scale * delta;
             arrived = false;
         end
 
@@ -239,14 +235,6 @@ classdef Context
 
             dist = vecnorm(memory - position(:)', 2, 2);
             tf = any(dist < radius);
-        end
-
-        function q = normalizeArmQ(q)
-            if isempty(q)
-                return;
-            end
-
-            q = wrapToPi(q);
         end
     end
 end
